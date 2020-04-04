@@ -2,6 +2,8 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"io/ioutil"
 	"log"
 	"net/rpc"
 )
@@ -24,9 +26,15 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to read server.cert")
 	}
+
+	certPool := x509.NewCertPool()
+	certBytes, err := ioutil.ReadFile("client/client.crt")
+	certPool.AppendCertsFromPEM(certBytes)
 	// fmt.Println(cert)
 	config := &tls.Config{
 		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    certPool,
 	}
 	listener, _ := tls.Listen("tcp", ":1234", config)
 	log.Printf("Serving RPC server on port %d", 1234)

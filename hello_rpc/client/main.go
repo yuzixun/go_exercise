@@ -13,7 +13,7 @@ type Result struct {
 }
 
 func main() {
-	// cert, err := tls.LoadX509KeyPair("client/client.crt", "client/client.key")
+	cert, err := tls.LoadX509KeyPair("client/client.crt", "client/client.key")
 	if err != nil {
 		log.Fatal("failed to load x509 key pair")
 	}
@@ -27,8 +27,8 @@ func main() {
 	certPool.AppendCertsFromPEM(certBytes)
 
 	config := &tls.Config{
-		// Certificates: []tls.Certificate{cert},
-		RootCAs: certPool,
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      certPool,
 	}
 
 	// config := &tls.Config{
