@@ -1,15 +1,16 @@
 package main
 
 import (
-	"bufio"
 	"crypto/md5"
 	"encoding/hex"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
+	parser "log-analysis/parser"
+
+	"github.com/gomodule/redigo/redis"
 	"github.com/sirupsen/logrus"
 )
 
@@ -18,156 +19,130 @@ type CmdParams struct {
 	routineNum  int
 }
 
-type LogData struct {
-	remoteAddr           string
-	remoteUser           string
-	timeLocal            string
-	request              string
-	host                 string
-	status               string
-	requestLength        string
-	bodyBytesSent        string
-	httpReferer          string
-	httpUserAgent        string
-	forwardedFor         string
-	upstreamAddr         string
-	requestTime          string
-	upstreamResponseTime string
-}
-
 type urlData struct {
-	data    LogData
-	uid     string
-	urlNode urlNode
+	nginxLog parser.NgxLog
+	uid      string
 }
 
-type urlNode struct {
-	nodeType      string
-	nodeRequestID int
-	nodeURL       string
-	nodeTime      string
-}
-
-type storageBlock struct {
-	counterType  string // PV or Uv
-	storageModel string
-	unode        urlNode
-}
-
-var log = logrus.New()
+var logger = logrus.New()
+var redisClient *redis.Pool
 
 func init() {
-	log.Out = os.Stdout
-	log.SetLevel(logrus.DebugLevel)
+	logger.Out = os.Stdout
+	logger.SetLevel(logrus.DebugLevel)
 }
 
 func main() {
-	//
+	redisClient = &redis.Pool{
+		MaxIdle:     10,
+		MaxActive:   10,
+		IdleTimeout: 10 * time.Second,
+		Wait:        true,
+		Dial: func() (redis.Conn, error) {
+			con, err := redis.Dial("tcp", ":6379",
+				redis.DialConnectTimeout(3*time.Second),
+				redis.DialReadTimeout(3*time.Second),
+				redis.DialWriteTimeout(3*time.Second))
+			if err != nil {
+				return nil, err
+			}
+			return con, nil
+		},
+	}
+
 	pLogFilePath := flag.String("logFilePath", "./access.log", "log file path")
 	pRoutineNum := flag.Int("routineNum", 5, "consumer number of go routine")
-	pLogPath := flag.String("logPath", "./logs", "save log for this application")
+	pLogPath := flag.String("logPath", "./process.log", "save log for this application")
 
 	flag.Parse()
 
 	params := CmdParams{logFilePath: *pLogFilePath, routineNum: *pRoutineNum}
-	fmt.Println("params ios", params, *pLogPath)
-	//
+	// fmt.Println("params is", params, *pLogPath)
+
 	logFd, err := os.OpenFile(*pLogPath, os.O_CREATE|os.O_WRONLY, 0777)
 	if err == nil {
-		log.Out = logFd
+		logger.Out = logFd
 		defer logFd.Close()
 	}
-	fmt.Println("xxxxxxxxxx")
-	log.Infoln("application started")
-	log.Infoln("Params is ", params)
-	logChannel := make(chan string, 3*params.routineNum)
+
+	logger.Infoln("application started")
+	logger.Infoln("Params is ", params)
+
+	logChannel := make(chan parser.NgxLog, 3*params.routineNum)
 	pvChannel := make(chan urlData, params.routineNum)
 	uvChannel := make(chan urlData, params.routineNum)
-	storageChannel := make(chan storageBlock, params.routineNum)
 
-	go parseLog(params, logChannel)
+	go parser.Handle(params.logFilePath, logChannel)
 
 	for i := 0; i < params.routineNum; i++ {
 		go logConsumer(logChannel, pvChannel, uvChannel)
 	}
 
-	go pvCounter(pvChannel, storageChannel)
-	go uvCounter(uvChannel, storageChannel)
+	go pvCounter(pvChannel)
+	go uvCounter(uvChannel)
 
-	go dataPersist(storageChannel)
-
-	// time.Sleep(time.Second * 1000)
-	time.Sleep(time.Second * 3)
+	time.Sleep(time.Second * 1000)
 }
 
-func dataPersist(storageChannel chan storageBlock) {
-
-}
-
-func pvCounter(pvChannel chan urlData, storageChannel chan storageBlock) {
-}
-
-func uvCounter(uvChannel chan urlData, storageChannel chan storageBlock) {
-
-}
-
-func logConsumer(logChannel chan string, pvChannel chan urlData, uvChannel chan urlData) {
-	for line := range logChannel {
-		// fmt.Println(line)
-		data := parseLine(line)
-		// fmt.Println(data)
+func logConsumer(logChannel chan parser.NgxLog, pvChannel chan urlData, uvChannel chan urlData) {
+	for ngxLog := range logChannel {
+		// fmt.Println(ngxLog)
 
 		hasher := md5.New()
-		hasher.Write([]byte(data.httpReferer + data.httpUserAgent))
+		hasher.Write([]byte(ngxLog.RemoteAddr + ngxLog.HttpUserAgent))
 		uid := hex.EncodeToString(hasher.Sum(nil))
 
-		uData := urlData{*data, uid, formatURL((*data).request, (*data).timeLocal)}
-		fmt.Println(uData)
-		log.Infoln(uData)
+		uData := urlData{ngxLog, uid}
+		logger.Infoln(uData)
 		pvChannel <- uData
 		uvChannel <- uData
 	}
-	// line := <-logChannel
-
 }
 
-func formatURL(request string, time string) urlNode {
-	return urlNode{
-		// request: "movie",
-		nodeType:      "list",
-		nodeRequestID: 0,
-		nodeURL:       "url",
-		nodeTime:      "time",
-	}
-}
+func pvCounter(pvChannel chan urlData) {
+	// 从池里获取连接
+	redisCon := redisClient.Get()
+	// 用完后将连接放回连接池
+	defer redisCon.Close()
+	for log := range pvChannel {
 
-func parseLog(params CmdParams, logChannel chan string) error {
-	fd, err := os.Open(params.logFilePath)
-	if err != nil {
-		log.Errorf("file can not open")
-		return err
-	}
-
-	defer fd.Close()
-	count := 0
-	bufferRead := bufio.NewReader(fd)
-	for {
-		line, err := bufferRead.ReadString('\n')
+		// fmt.Println("pv", log.nginxLog.Time)
+		time := log.nginxLog.Time.Format("2006010215")
+		key := fmt.Sprintf("la:PV:%s", time)
+		_, err := redisCon.Do("zincrby", key, 1, log.nginxLog.RequestURL)
+		// fmt.Println("pv", key, log.nginxLog.RequestURL)
 		if err != nil {
-			if err == io.EOF {
-				time.Sleep(3 * time.Second)
-				log.Infof("wait for three seconds")
-			} else {
-				log.Errorf("read Line Error")
-			}
-		}
-
-		logChannel <- line
-		break
-		count++
-		if count%(1000*params.routineNum) == 0 {
-			log.Infof("read file line: %d", count)
+			logger.Errorln("pv set redis err", err)
 		}
 	}
-	return nil
+}
+
+func uvCounter(uvChannel chan urlData) {
+	// 从池里获取连接
+	redisCon := redisClient.Get()
+	// 用完后将连接放回连接池
+	defer redisCon.Close()
+	for log := range uvChannel {
+
+		// fmt.Println("uv", log.nginxLog.Time)
+		time := log.nginxLog.Time.Format("20060102")
+		hllKey := fmt.Sprintf("la:kll:%s", time)
+
+		result, err := redisCon.Do("pfadd", hllKey, log.uid)
+		// fmt.Println("uv", hllKey, result, log.uid)
+		if err != nil {
+			fmt.Println(err)
+		}
+
+		if result.(int64) != 1 {
+			continue
+		}
+
+		key := fmt.Sprintf("la:UV:%s", time)
+		_, err = redisCon.Do("zincrby", key, 1, log.nginxLog.RequestURL)
+		// fmt.Println("uv", key, log.nginxLog.RequestURL)
+		if err != nil {
+			logger.Errorln("uv set redis err", err)
+		}
+	}
 }
