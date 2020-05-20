@@ -86,7 +86,6 @@ func (this *generator) blockToNextMillis(lastTimestamp int64) int64 {
 	timestamp := this.curTime()
 
 	for timestamp <= this.lastTimestamp {
-		fmt.Println(timestamp, this.lastTimestamp)
 		timestamp = this.curTime()
 	}
 
@@ -94,5 +93,13 @@ func (this *generator) blockToNextMillis(lastTimestamp int64) int64 {
 }
 
 func (this *generator) curTime() int64 {
-	return time.Now().UnixNano() / int64(time.Millisecond)
+	return time.Now().UnixNano() / 1e6
 }
+
+// func (this *generator) unixNano() int64 {
+// 	return time.Now().UnixNano()
+// }
+
+// func (this *generator) mills() int64 {
+// 	return int64(time.Millisecond)
+// }
